@@ -43,6 +43,8 @@ idf.py -B build-c5 -DIDF_TARGET=esp32c5 -DSDKCONFIG=sdkconfig.c5 \
 idf.py -B build-c5 -p /dev/ttyACM0 flash
 ```
 
+ESP32-C5 by default uses internal antenna, can be switched to external by adding `-DESP_SDR_C5_ANTENNA=EXTERNAL` build flag.
+
 On Windows PowerShell quote the `-D` arguments (`"-DIDF_TARGET=esp32c5"`).
 `python tools/espsoup_release.py --build-dir build-c5 --version 0.7.0 --output release`
 packages a build (bootloader, partition table, application, `manifest.json`,

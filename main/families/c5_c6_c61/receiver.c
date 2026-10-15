@@ -19,6 +19,10 @@
 #include "riscv/rv_utils.h"
 #include "hal/usb_serial_jtag_ll.h"
 
+#ifdef C5_WAVESHARE_ANTENNA_LEVEL
+#include "driver/gpio.h"
+#endif
+
 #ifndef CONFIG_IDF_TARGET_ESP32C6
 #define CONFIG_IDF_TARGET_ESP32C6 0
 #endif
@@ -255,6 +259,19 @@ static void handle_command(char *line);
 
 void app_main(void) {
 
+#ifdef C5_WAVESHARE_ANTENNA_LEVEL
+    /* Waveshare ESP32-C5-Zero antenna switch: low = onboard, high = IPEX-1.
+     * Select it before esp_wifi_init() initializes the RF/PHY path. */
+    gpio_config_t antenna_gpio = {
+        .pin_bit_mask = 1ULL << GPIO_NUM_26,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&antenna_gpio));
+    ESP_ERROR_CHECK(gpio_set_level(GPIO_NUM_26, C5_WAVESHARE_ANTENNA_LEVEL));
+#endif
     esp_log_level_set("*",ESP_LOG_NONE);
     esp_err_t e=nvs_flash_init();
     if(e==ESP_ERR_NVS_NO_FREE_PAGES||e==ESP_ERR_NVS_NEW_VERSION_FOUND) {

@@ -57,10 +57,13 @@ extern void phy_i2c_writeReg(unsigned,unsigned,unsigned,unsigned);
 static void rx_analog_apply(unsigned saved[2]) {
     for(unsigned j=0;j<2;j++) {
         saved[j]=phy_chip_i2c_readReg(0x67,1,RX_FILTER_REG+j);
-        if(rx_analog_filter>=0)phy_i2c_writeReg(0x67,1,RX_FILTER_REG+j,(saved[j]&~63u)|(unsigned)rx_analog_filter);
+        phy_i2c_writeReg(0x67,1,RX_FILTER_REG+j,(saved[j]&~63u)|(unsigned)rx_analog_filter);
     }
 }
 static void rx_analog_restore(const unsigned saved[2]) {
+    /* Automatic mode writes nothing back (restore is a no-op), so the two
+     * PHY I2C reads per snapshot are skipped as well. */
+    if(rx_analog_filter<0){saved[0]=saved[1]=0;return;}
     if(rx_analog_filter>=0)for(unsigned j=0;j<2;j++)phy_i2c_writeReg(0x67,1,RX_FILTER_REG+j,saved[j]);
 }
 
@@ -124,12 +127,18 @@ static void pack_iq8(unsigned n) {
         uint32_t w=IQ_BUFFER[j];p[2*j]=(w>>2)&255;p[2*j+1]=(w>>12)&255;
     }
 }
+#if CONFIG_IDF_TARGET_ESP32C6
+/* ESPsoup C6: grid sentinels, IQ8 packing with the CRC folded in, slicing-by-4
+ * CRC32 (same bytes and CRC on the wire as the generic path below). */
+#include "c6_frame.h"
+#else
 
 static size_t wire_size(unsigned n,unsigned format) {
     return format==16?n*2:format==20?packed_size(n):n*4;
 }
 #if defined(SAMPLE_RATE_PROBE) && CONFIG_IDF_TARGET_ESP32C5
 /* Volatile, bounded dump-clock/source investigation; excluded from releases. */
+#endif
 static unsigned probe_source,probe_clock,probe_adc=4;
 extern void phy_adc_rate_set(unsigned);
 extern unsigned phy_chip_i2c_readReg(unsigned,unsigned,unsigned);
@@ -138,7 +147,13 @@ static bool probe_capture;
 #endif
 static bool acquire_iq(unsigned n,unsigned divider,unsigned *capture_us) {
     prepare_rx();
-    
+
+#if CONFIG_IDF_TARGET_ESP32C6
+    /* The dump writer is sequential and completion is polled (chip.h), so
+     * sentinels on a grid plus the whole tail detect an unfinished or
+     * misrouted dump without writing and reading all n words twice. */
+    c6_sentinel_fill(IQ_BUFFER,n);
+#else
     for(unsigned j=0;j<n;j++)IQ_BUFFER[j]=0xa5a0055au;
     for(unsigned j=0;j<4;j++)IQ_BUFFER[n+j]=0x5a5aa5a5u^j;
     unsigned analog_saved[2];rx_analog_apply(analog_saved);
@@ -147,6 +162,7 @@ static bool acquire_iq(unsigned n,unsigned divider,unsigned *capture_us) {
     unsigned adc_saved=phy_chip_i2c_readReg(0x66,0,4);
     uint32_t adc_digital_saved=REG_READ(0x600a0448);
     if(probe_adc<2)phy_adc_rate_set(probe_adc);
+#endif
 #endif
     bool done=true;
     int64_t start=esp_timer_get_time();
@@ -184,12 +200,17 @@ static bool acquire_iq(unsigned n,unsigned divider,unsigned *capture_us) {
     for(unsigned j=0;j<4;j++) {
         if(IQ_BUFFER[n+j]!=(0x5a5aa5a5u^j)){reply("ERR capture_overrun\n");return false;}
     }
+#if CONFIG_IDF_TARGET_ESP32C6
+    int bad=c6_sentinel_check(IQ_BUFFER,n);
+    if(bad){reply(bad==1?"ERR capture_timeout\n":"ERR capture_overrun\n");return false;}
+#else
     *capture_us = elapsed;
     return true;
 }
 
 #if CONFIG_IDF_TARGET_ESP32C5
 #include "c5_opt.h"        /* ESPsoup extensions (register-level engine, DSP, continuous capture) */
+#endif
 #if defined(C5_GAP_PROBE)
 #include "c5_gap_probe.h"
 #endif
@@ -222,8 +243,14 @@ static bool capture(unsigned n,unsigned divider,unsigned format) {
     snprintf(h,sizeof(h),"DATA %u %08" PRIx32 " %" PRIu32 "\n",n,crc,(uint32_t)elapsed);
     return send_bytes(h,strlen(h)) && send_bytes(IQ_BUFFER,bytes);
 }
+#if CONFIG_IDF_TARGET_ESP32C6
+    uint32_t crc;
+    if(format==16)crc=c6_pack_iq8_crc(IQ_BUFFER,n);
+    else{if(format==20)pack_iq(n);crc=c6_crc32(0,IQ_BUFFER,bytes);}
+#else
 
 #if CONFIG_IDF_TARGET_ESP32C61 || CONFIG_IDF_TARGET_ESP32C6
+#endif
 static bool ring_test(const char *line) {
     unsigned ms,rate,stride=1,upf=1,det=0,n=256,stats=0; char extra;
     int fields=sscanf(line,"SPEC %u %u %u %u %u %u %u %c",&ms,&stride,&upf,&det,&rate,&n,&stats,&extra);
@@ -290,6 +317,9 @@ void app_main(void) {
         if(status<0){reply("ERR command_length\n");continue;}
         owner=port;
         handle_command(line);
+#if CONFIG_IDF_TARGET_ESP32C6
+    c6_crc_init();
+#endif
         if(!strcmp(line,"RELEASE"))owner=-1;
         lease_deadline=esp_timer_get_time()+5000000;
     }

@@ -54,4 +54,21 @@ menu "ESP-SDR transport"
         default 12 if IDF_TARGET_ESP32C5
         default 44
 
+    config ESP_SDR_SDIO_ENABLED
+        bool "SDIO slave transport (ESP32-C6 co-processor of an ESP32-P4)"
+        depends on IDF_TARGET_ESP32C6
+        default n
+        help
+            Serve the burst protocol as an SDIO slave on the fixed SDIO pins
+            (GPIO18..23 on the C6). The ESP32-P4 bridge firmware talks to it
+            through ESSL and forwards USB and Ethernet.
+
+    config ESP_SDR_OTA_ENABLED
+        bool "In-band OTA command (OTA <size> <crc32>)"
+        depends on IDF_TARGET_ESP32C6
+        default n
+        help
+            Accept a new application image over the burst transport and switch
+            the boot partition. Needs an OTA partition layout.
+
 endmenu

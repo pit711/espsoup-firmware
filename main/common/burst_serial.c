@@ -17,6 +17,9 @@
 #if CONFIG_IDF_TARGET_ESP32S2
 #include "esp_private/usb_console.h"
 #endif
+#if CONFIG_ESP_SDR_SDIO_ENABLED
+#include "sdio_link.h"
+#endif
 
 #ifndef CONFIG_ESP_SDR_UART_BAUD
 #define CONFIG_ESP_SDR_UART_BAUD 2000000
@@ -32,6 +35,7 @@ static struct {
     bool overflow;
     int64_t last_byte;
 } input[BURST_SERIAL_COUNT];
+static int64_t last_activity;   /* last command or payload; idle polling stays tight for a while after it */
 
 /* Transport commands are consumed here for every receiver backend. The ACK
  * is completely transmitted at the old rate before changing UART0. The rate
@@ -94,6 +98,9 @@ void burst_serial_init(void) {
     ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 8192, 0, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_flush_input(UART_NUM_0));
 #endif
+#if CONFIG_ESP_SDR_SDIO_ENABLED
+    if (sdio_link_init()) active_port = BURST_SERIAL_SDIO;
+#endif
 }
 
 burst_serial_port_t burst_serial_port(void) { return active_port; }
@@ -102,6 +109,9 @@ unsigned burst_serial_baud(void) {
 }
 
 static int read_port(burst_serial_port_t port, void *buffer, size_t size) {
+#if CONFIG_ESP_SDR_SDIO_ENABLED
+    if (port == BURST_SERIAL_SDIO) return sdio_link_read(buffer, size);
+#endif
     if (port == BURST_SERIAL_UART) {
 #if CONFIG_ESP_SDR_UART_ENABLED
         return uart_read_bytes(UART_NUM_0, buffer, size, 0);
@@ -134,6 +144,9 @@ bool burst_serial_stop_requested(void) {
 int IRAM_ATTR burst_serial_try_send(const void *data, size_t size) {
     const uint8_t *p = data;
     size_t done = 0;
+#if CONFIG_ESP_SDR_SDIO_ENABLED
+    if (active_port == BURST_SERIAL_SDIO) return sdio_link_write(p, size);
+#endif
     if (active_port == BURST_SERIAL_UART) {
 #if CONFIG_ESP_SDR_UART_ENABLED
         int sent = uart_tx_chars(UART_NUM_0, (const char *)p, size > 128 ? 128 : size);
@@ -250,7 +263,36 @@ void burst_serial_drain_stop(void) {
     memset(&input[active_port], 0, sizeof(input[active_port]));
 }
 
+int burst_serial_read_raw(void *buf, size_t size) {
+    return read_port(active_port, buf, size);
+}
+
+void burst_serial_hold(bool on) {
+#if CONFIG_ESP_SDR_SDIO_ENABLED
+    if (active_port == BURST_SERIAL_SDIO) sdio_link_hold(on);
+#else
+    (void)on;
+#endif
+}
+
+/* Idle step of the command loop. The SDIO link has no interrupt handler, so
+ * keep polling while output is still queued or shortly after traffic (the
+ * next command of a burst then waits microseconds, not a tick); otherwise
+ * sleep a tick as before. */
+void burst_serial_idle(void) {
+#if CONFIG_ESP_SDR_SDIO_ENABLED
+    if (active_port == BURST_SERIAL_SDIO) {
+        sdio_link_poll();
+        if (sdio_link_tx_pending() || esp_timer_get_time() - last_activity < 200000) { taskYIELD(); return; }
+    }
+#endif
+    vTaskDelay(1);
+}
+
 int burst_serial_poll_line(char *line, size_t capacity) {
+#if CONFIG_ESP_SDR_SDIO_ENABLED
+    sdio_link_poll();
+#endif
     for (unsigned j = 0; j < BURST_SERIAL_COUNT; ++j) {
         unsigned port = (next_port + j) % BURST_SERIAL_COUNT;
         int64_t now = esp_timer_get_time();
@@ -277,6 +319,7 @@ int burst_serial_poll_line(char *line, size_t capacity) {
             if (!used && !overflow) continue;
             active_port = port;
             next_port = (port + 1) % BURST_SERIAL_COUNT;
+            last_activity = now;
             if (overflow || used >= capacity) return -1;
             memcpy(line, input[port].line, used);
             line[used] = '\0';
@@ -300,9 +343,18 @@ bool IRAM_ATTR burst_serial_send(const void *data, size_t size) {
     const uint8_t *p = data;
     size_t original = size;
     int64_t deadline = transfer_deadline(size);
+    last_activity = esp_timer_get_time();
     while (size) {
         if (esp_timer_get_time() >= deadline) return false;
         int sent;
+#if CONFIG_ESP_SDR_SDIO_ENABLED
+        if (active_port == BURST_SERIAL_SDIO) {
+            sent = sdio_link_write(p, size);
+            /* Buffers come back as soon as the host has read them: keep
+             * polling instead of sleeping a tick. The deadline bounds it. */
+            if (!sent) { sdio_link_poll(); taskYIELD(); }
+        } else
+#endif
         if (active_port == BURST_SERIAL_UART) {
             sent = uart_tx_chars(UART_NUM_0, (const char *)p, size > 128 ? 128 : size);
             if (sent < 0) return false;
@@ -325,6 +377,9 @@ bool IRAM_ATTR burst_serial_send(const void *data, size_t size) {
         p += sent;
         size -= sent;
     }
+#if CONFIG_ESP_SDR_SDIO_ENABLED
+    if (active_port == BURST_SERIAL_SDIO) { sdio_link_flush(); return true; }
+#endif
 #if SOC_USB_SERIAL_JTAG_SUPPORTED
     if (active_port == BURST_SERIAL_USB && original && original % 64 == 0) {
         while (!usb_serial_jtag_ll_txfifo_writable())

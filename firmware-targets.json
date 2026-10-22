@@ -90,6 +90,15 @@
       "preview": true,
       "streaming": true,
       "sdkconfig": "sdkconfig.defaults.esp32s31-stream"
+    },
+    {
+      "id": "esp32c6-sdio",
+      "target": "esp32c6",
+      "label": "ESP32-C6 co-processor of an ESP32-P4 module (SDIO, OTA layout)",
+      "idf_ref": "25fe69f946311abdaf9ad56591f25fedbc20ac98",
+      "allow_larger_flash": true,
+      "preview": false,
+      "sdkconfig": "sdkconfig.defaults.esp32c6-sdio"
     }
   ],
   "unavailable": {}
